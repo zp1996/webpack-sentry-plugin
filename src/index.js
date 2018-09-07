@@ -9,6 +9,7 @@ const DEFAULT_TRANSFORM = filename => `~/${filename}`
 const DEFAULT_DELETE_REGEX = /\.map$/
 const DEFAULT_BODY_TRANSFORM = (version, projects) => ({ version, projects })
 const DEFAULT_UPLOAD_FILES_CONCURRENCY = Infinity
+const DEFAULT_CLEAR_RELEASE = () => false
 
 module.exports = class SentryPlugin {
   constructor(options) {
@@ -21,7 +22,7 @@ module.exports = class SentryPlugin {
         // eslint-disable-next-line no-console
         console.warn(
           "baseSentryURL with '/projects' suffix is deprecated; " +
-            'see https://github.com/40thieves/webpack-sentry-plugin/issues/38',
+            'see https://github.com/40thieves/webpack-sentrDEFAULT_CLEAR_RELEASE y-plugin/issues/38',
         )
         this.baseSentryURL = options.baseSentryURL.replace(projectsRegex, '')
       }
@@ -35,10 +36,14 @@ module.exports = class SentryPlugin {
 
     this.organizationSlug = options.organization || options.organisation
     this.projectSlug = options.project
+    this.uploadProject = options.uploadProject
+
     if (typeof this.projectSlug === 'string') {
       this.projectSlug = [this.projectSlug]
     }
     this.apiKey = options.apiKey
+
+    this.clearFiles = options.clearFiles || DEFAULT_CLEAR_RELEASE
 
     this.releaseBody = options.releaseBody || DEFAULT_BODY_TRANSFORM
     this.releaseVersion = options.release
@@ -75,6 +80,8 @@ module.exports = class SentryPlugin {
     this.deleteRegex = options.deleteRegex || DEFAULT_DELETE_REGEX
     this.uploadFilesConcurrency =
       options.uploadFilesConcurrency || DEFAULT_UPLOAD_FILES_CONCURRENCY
+
+    this.auth = { bearer: this.apiKey }
   }
 
   apply(compiler) {
@@ -98,7 +105,8 @@ module.exports = class SentryPlugin {
         )
       }
 
-      return this.createRelease()
+      return this.clearSentryFiles()
+        .then(() => this.createRelease())
         .then(() => this.uploadFiles(files))
         .then(() => cb())
         .catch(err => this.handleErrors(err, compilation, cb))
@@ -175,6 +183,37 @@ module.exports = class SentryPlugin {
     return combined
   }
 
+  clearSentryFiles() {
+    if (!this.clearFiles()) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+      return request({
+        url: `${this.projectFileReleaseUrl()}/`,
+        method: 'GET',
+        auth: this.auth
+      })
+      .then((files) => {
+        files = JSON.parse(files);
+        const tasks = files.map((file) => {
+          return request({
+            url: `${this.projectFileReleaseUrl()}/${file.id}/`,
+            method: 'DELETE',
+            auth: this.auth
+          })
+        })
+        return Promise.all(tasks)
+      })
+      .then(() => resolve())
+      .catch((err) => {
+        if (err.statusCode === 404) {
+          resolve()
+        } else {
+          reject(err)
+        }
+      })
+    })
+  }
+
   createRelease() {
     return request(
       this.combineRequestOptions(
@@ -210,7 +249,7 @@ module.exports = class SentryPlugin {
     return request(
       this.combineRequestOptions(
         {
-          url: `${this.sentryReleaseUrl()}/${this.releaseVersion}/files/`,
+          url: `${this.projectFileReleaseUrl()}/`,
           method: 'POST',
           auth: {
             bearer: this.apiKey,
@@ -229,6 +268,12 @@ module.exports = class SentryPlugin {
   sentryReleaseUrl() {
     return `${this.baseSentryURL}/organizations/${this
       .organizationSlug}/releases`
+  }
+
+  projectFileReleaseUrl() {
+    return `${this.baseSentryURL}/projects/${this
+      .organizationSlug}/${this.uploadProject}/releases/${this
+      .releaseVersion}/files`
   }
 
   deleteFiles(stats) {
